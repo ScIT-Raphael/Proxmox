@@ -1,0 +1,79 @@
+#!/bin/bash
+
+HESTIA_USERS_DIR="/usr/local/hestia/data/users"
+DNS_SERVER="8.8.8.8"  # Alternativer DNS-Server zur Überprüfung
+ERRORS=()
+DOMAINS_DNSSEC=()
+
+# Funktion zur Überprüfung von DNS-Auflösung
+check_dns_resolution() {
+    local domain=$1
+    local ip=$(dig +short "$domain" @${DNS_SERVER} | head -n 1)
+
+    if [[ -z "$ip" ]]; then
+        ERRORS+=("CRITICAL: DNS-Auflösung fehlgeschlagen für $domain")
+    fi
+}
+
+# Funktion zur Überprüfung von DNSSEC (nur für aktivierte Domains)
+check_dnssec() {
+    local domain=$1
+    local dnssec_status=$(dig +dnssec +short "$domain" @${DNS_SERVER} | grep -E "RRSIG|DNSKEY")
+
+    if [[ -z "$dnssec_status" ]]; then
+        ERRORS+=("WARNING: DNSSEC fehlt oder ist ungültig für $domain")
+    fi
+}
+
+# Domains aus Hestia-DNS-Konfigurationen auslesen, nur mit aktivem DNSSEC
+read_hestia_dns_domains() {
+    local domains=()
+
+    for dns_conf in "$HESTIA_USERS_DIR"/*/dns.conf; do
+        if [[ -f "$dns_conf" ]]; then
+            while read -r line; do
+                domain=$(echo "$line" | grep -oP '(?<=DOMAIN=)[^ ]+' | tr -d "'")
+                dnssec_enabled=$(echo "$line" | grep -oP '(?<=DNSSEC=)[^ ]+' | tr -d "'")
+
+                if [[ -n "$domain" ]]; then
+                    domains+=("$domain")
+                    # Falls DNSSEC aktiv ist, speichere es für spätere Prüfung
+                    if [[ "$dnssec_enabled" == "yes" ]]; then
+                        DOMAINS_DNSSEC+=("$domain")
+                    fi
+                fi
+            done < "$dns_conf"
+        fi
+    done
+
+    echo "${domains[@]}"
+}
+
+# Hauptprüfung
+main() {
+    domains=$(read_hestia_dns_domains)
+
+    if [[ -z "$domains" ]]; then
+        echo "UNKNOWN: Keine Domains in Hestia DNS gefunden"
+        exit 3
+    fi
+
+    for domain in $domains; do
+        check_dns_resolution "$domain"
+    done
+
+    # DNSSEC nur für aktivierte Domains checken
+    for domain in "${DOMAINS_DNSSEC[@]}"; do
+        check_dnssec "$domain"
+    done
+
+    if [[ ${#ERRORS[@]} -eq 0 ]]; then
+        echo "OK: Alle DNS-Einträge sind erreichbar und DNSSEC ist aktiv (sofern aktiviert)"
+        exit 0
+    else
+        printf "%s\n" "${ERRORS[@]}"
+        exit 2
+    fi
+}
+
+main
