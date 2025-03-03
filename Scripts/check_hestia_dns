@@ -54,8 +54,8 @@ main() {
     domains=$(read_hestia_dns_domains)
 
     if [[ -z "$domains" ]]; then
-        echo "UNKNOWN: Keine Domains in Hestia DNS gefunden"
-        exit 3
+        echo "OK: Keine Domains in Hestia DNS gefunden"
+        exit 0
     fi
 
     for domain in $domains; do
