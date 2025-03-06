@@ -74,8 +74,8 @@ main() {
     read_hestia_dns_domains  # Direkt ausführen, keine Rückgabe speichern
 
     if [[ ${#DOMAINS_DNSSEC[@]} -eq 0 ]]; then
-        echo "UNKNOWN: Keine Domains mit aktivem DNSSEC gefunden"
-        exit 3
+        echo "OK: Keine Domains mit aktivem DNSSEC gefunden"
+        exit 0
     fi
 
     for domain in "${DOMAINS_DNSSEC[@]}"; do
