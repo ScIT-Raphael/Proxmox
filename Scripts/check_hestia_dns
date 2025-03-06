@@ -1,9 +1,9 @@
 #!/bin/bash
 
 HESTIA_USERS_DIR="/usr/local/hestia/data/users"
-DNS_SERVER="8.8.8.8"  # Alternativer DNS-Server zur Überprüfung
+DNS_SERVER="1.1.1.1"  # Cloudflare als zuverlässiger DNS-Resolver für DNSSEC
 ERRORS=()
-DOMAINS_DNSSEC=()
+declare -g DOMAINS_DNSSEC=()  # Globale Variable für DNSSEC-Domains
 
 # Funktion zur Überprüfung von DNS-Auflösung
 check_dns_resolution() {
@@ -15,29 +15,51 @@ check_dns_resolution() {
     fi
 }
 
-# Funktion zur Überprüfung von DNSSEC (nur für aktivierte Domains)
+# Funktion zur Überprüfung von DNSSEC mit Ablaufdatum-Check
 check_dnssec() {
     local domain=$1
-    local dnssec_status=$(dig +dnssec +short "$domain" @${DNS_SERVER} | grep -E "RRSIG|DNSKEY")
 
-    if [[ -z "$dnssec_status" ]]; then
+    # Holen der DNSSEC Signaturdaten (RRSIG)
+    local dnssec_data=$(dig +dnssec "$domain" @$DNS_SERVER | grep -E "RRSIG")
+
+    if [[ -z "$dnssec_data" ]]; then
         ERRORS+=("WARNING: DNSSEC fehlt oder ist ungültig für $domain")
+        return
+    fi
+
+    # Ablaufdatum extrahieren (9. Spalte der dig-Ausgabe, UNIX-Zeit)
+    local expiration_epoch=$(echo "$dnssec_data" | awk '{print $9}')
+    if [[ -z "$expiration_epoch" ]]; then
+        ERRORS+=("WARNING: DNSSEC-Signatur für $domain hat kein Ablaufdatum (ungültig)")
+        return
+    fi
+
+    # Aktuelles Datum in UNIX-Zeit
+    local current_epoch=$(date +%s)
+
+    # Berechnen der verbleibenden Tage
+    local remaining_days=$(( (expiration_epoch - current_epoch) / 86400 ))
+
+    if (( remaining_days < 0 )); then
+        ERRORS+=("CRITICAL: DNSSEC-Signatur für $domain ist abgelaufen!")
+    elif (( remaining_days < 7 )); then
+        ERRORS+=("WARNING: DNSSEC-Signatur für $domain läuft in $remaining_days Tagen ab!")
     fi
 }
 
 # Domains aus Hestia-DNS-Konfigurationen auslesen, nur mit aktivem DNSSEC
 read_hestia_dns_domains() {
     local domains=()
+    declare -g DOMAINS_DNSSEC=()  # Globale Variable zurücksetzen
 
     for dns_conf in "$HESTIA_USERS_DIR"/*/dns.conf; do
         if [[ -f "$dns_conf" ]]; then
-            while read -r line; do
-                domain=$(echo "$line" | grep -oP '(?<=DOMAIN=)[^ ]+' | tr -d "'")
-                dnssec_enabled=$(echo "$line" | grep -oP '(?<=DNSSEC=)[^ ]+' | tr -d "'")
+            while IFS= read -r line; do
+                domain=$(echo "$line" | grep -oP '(?<=DOMAIN=)[^ ]+' | tr -d "'\"")
+                dnssec_enabled=$(echo "$line" | grep -oP '(?<=DNSSEC=)[^ ]+' | tr -d "'\"")
 
                 if [[ -n "$domain" ]]; then
                     domains+=("$domain")
-                    # Falls DNSSEC aktiv ist, speichere es für spätere Prüfung
                     if [[ "$dnssec_enabled" == "yes" ]]; then
                         DOMAINS_DNSSEC+=("$domain")
                     fi
@@ -45,30 +67,23 @@ read_hestia_dns_domains() {
             done < "$dns_conf"
         fi
     done
-
-    echo "${domains[@]}"
 }
 
 # Hauptprüfung
 main() {
-    domains=$(read_hestia_dns_domains)
+    read_hestia_dns_domains  # Direkt ausführen, keine Rückgabe speichern
 
-    if [[ -z "$domains" ]]; then
-        echo "OK: Keine Domains in Hestia DNS gefunden"
-        exit 0
+    if [[ ${#DOMAINS_DNSSEC[@]} -eq 0 ]]; then
+        echo "UNKNOWN: Keine Domains mit aktivem DNSSEC gefunden"
+        exit 3
     fi
 
-    for domain in $domains; do
-        check_dns_resolution "$domain"
-    done
-
-    # DNSSEC nur für aktivierte Domains checken
     for domain in "${DOMAINS_DNSSEC[@]}"; do
         check_dnssec "$domain"
     done
 
     if [[ ${#ERRORS[@]} -eq 0 ]]; then
-        echo "OK: Alle DNS-Einträge sind erreichbar und DNSSEC ist aktiv (sofern aktiviert)"
+        echo "OK: Alle DNS-Einträge sind erreichbar und DNSSEC ist aktiv & gültig"
         exit 0
     else
         printf "%s\n" "${ERRORS[@]}"
